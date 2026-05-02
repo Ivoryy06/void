@@ -1,7 +1,7 @@
 use gtk::prelude::*;
 use gtk::{
     Application, ApplicationWindow, Box as GBox, Button, Entry, HeaderBar,
-    Orientation,
+    Notebook, Orientation, Label,
 };
 use webkit2gtk::{
     CacheModel, CookieAcceptPolicy, CookieManagerExt, HardwareAccelerationPolicy,
@@ -10,8 +10,7 @@ use webkit2gtk::{
     Settings, SettingsExt, TLSErrorsPolicy, URIRequestExt, WebResource,
     UserContentInjectedFrames, UserContentManager,
     UserContentManagerExt, UserScript, UserScriptInjectionTime, WebContext, WebContextExt,
-    WebView, WebViewExt, WebsiteDataManager, WebsiteDataManagerExt, WebsiteDataManagerExtManual,
-    WebsiteDataTypes,
+    WebView, WebViewExt, WebsiteDataManager, WebsiteDataManagerExt,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,9 +23,43 @@ use std::{
 };
 use libc;
 
-// Tor Browser's exact UA — blends in with the largest anonymity set
+
 const SPOOFED_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0";
+
+
+
+const BLOCK_LIST: &[&str] = &[
+    "doubleclick.net", "googlesyndication.com", "googletagmanager.com",
+    "googletagservices.com", "google-analytics.com", "googleadservices.com",
+    "adservice.google.", "pagead2.googlesyndication.com",
+    "facebook.com/tr", "connect.facebook.net",
+    "analytics.twitter.com", "ads.twitter.com", "t.co/i/adsct",
+    "amazon-adsystem.com", "advertising.com", "adnxs.com",
+    "adsrvr.org", "rubiconproject.com", "pubmatic.com", "openx.net",
+    "casalemedia.com", "criteo.com", "criteo.net", "outbrain.com",
+    "taboola.com", "scorecardresearch.com", "quantserve.com",
+    "chartbeat.com", "newrelic.com", "hotjar.com", "mouseflow.com",
+    "fullstory.com", "loggly.com", "mixpanel.com", "segment.com",
+    "segment.io", "amplitude.com", "heap.io", "intercom.io",
+    "intercomcdn.com", "zendesk.com/embeddable_framework",
+    "cdn.mxpnl.com", "bat.bing.com", "clarity.ms",
+    "mc.yandex.ru", "mc.yandex.com", "counter.ok.ru",
+    "ads.yahoo.com", "media.net", "bidswitch.net",
+    "smartadserver.com", "appnexus.com", "lijit.com",
+    "sovrn.com", "sharethrough.com", "triplelift.com",
+    "indexexchange.com", "33across.com", "spotxchange.com",
+    "spotx.tv", "teads.tv", "yieldmo.com", "undertone.com",
+    "mathtag.com", "bluekai.com", "krxd.net", "demdex.net",
+    "omtrdc.net", "2mdn.net", "moatads.com", "doubleverify.com",
+    "adsafeprotected.com", "sizmek.com", "flashtalking.com",
+    "serving-sys.com", "turn.com", "eyeota.net", "exelator.com",
+    "lotame.com", "addthis.com", "sharethis.com",
+];
+
+fn is_blocked(uri: &str) -> bool {
+    BLOCK_LIST.iter().any(|&pattern| uri.contains(pattern))
+}
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -66,8 +99,8 @@ fn save_config(c: &Config) {
     }
 }
 
-// Global tor child handle — written once at startup, read by signal handlers.
-// Using a Mutex<Option<Child>> so SIGTERM/SIGINT can kill it before process exit.
+
+
 static TOR_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 
 fn kill_tor() {
@@ -80,10 +113,10 @@ fn kill_tor() {
 const TOR_SOCKS: &str = "socks5://127.0.0.1:9050";
 const TOR_ADDR: &str = "127.0.0.1:9050";
 
-/// Build a stream-isolated Tor SOCKS5 URI for a given domain.
-/// Tor treats each unique (user, pass) pair as a separate circuit.
+
+
 fn tor_isolated_proxy(domain: &str) -> String {
-    // Use domain as the isolation key — same domain = same circuit, different = different exit
+    
     format!("socks5://{}:void@127.0.0.1:9050", urlencoding::encode(domain))
 }
 
@@ -305,40 +338,35 @@ const FINGERPRINT_SCRIPT: &str = r#"
     m.name = 'referrer'; m.content = 'no-referrer';
     (document.head || document.documentElement).prepend(m);
 
-    // ── Letterboxing CSS ──────────────────────────────────────────────────────
-    const s = document.createElement('style');
-    s.textContent = 'html,body{max-width:1000px!important;max-height:800px!important;overflow:hidden!important}';
-    (document.head || document.documentElement).prepend(s);
-
 })();
 "#;
 
 fn make_webcontext(proxy_uri: &Option<String>) -> (WebsiteDataManager, WebContext) {
     let data_mgr = WebsiteDataManager::new_ephemeral();
-    // Force UTC at the engine level — overrides OS timezone for all JS/CSS date ops
+    
     let ctx = WebContext::builder()
         .website_data_manager(&data_mgr)
         .time_zone_override("UTC")
-        // Isolate each cross-site navigation into its own web process
+        
         .process_swap_on_cross_site_navigation_enabled(true)
         .build();
     ctx.set_cache_model(CacheModel::DocumentViewer);
-    // Lock Accept-Language to en-US,en — matches Tor Browser
+    
     ctx.set_preferred_languages(&["en-US", "en"]);
     #[allow(deprecated)]
     ctx.set_tls_errors_policy(TLSErrorsPolicy::Fail);
-    // One process per site — prevents cross-site memory/timing correlation.
-    // process_swap_on_cross_site_navigation_enabled (set in builder) handles this in 2.40+.
-    // Sandbox renderer processes — limits crash-time leaks
+    
+    
+    
     ctx.set_sandbox_enabled(true);
     if let Some(cm) = ctx.cookie_manager() {
         cm.set_accept_policy(CookieAcceptPolicy::Never);
     }
-    // ITP: Intelligent Tracking Prevention — partition cross-site storage
+    
     data_mgr.set_itp_enabled(true);
-    // Never persist credentials to disk
+    
     data_mgr.set_persistent_credential_storage_enabled(false);
-    // HTTP→HTTPS: handled in connect_decide_policy (register_uri_scheme("http") blocked in 2.40+)
+    
     match proxy_uri {
         Some(uri) => {
             let mut ps = NetworkProxySettings::new(Some(uri.as_str()), &[]);
@@ -366,8 +394,8 @@ fn make_webview(ctx: &WebContext) -> WebView {
     wv_settings.set_enable_media_stream(false);
     wv_settings.set_enable_webrtc(false);
     wv_settings.set_allow_modal_dialogs(false);
-    wv_settings.set_enable_webaudio(true); // TB has audio enabled; JS layer handles fingerprinting
-    wv_settings.set_enable_site_specific_quirks(true); // TB leaves this on
+    wv_settings.set_enable_webaudio(true); 
+    wv_settings.set_enable_site_specific_quirks(true); 
     #[allow(deprecated)]
     wv_settings.set_enable_java(false);
     #[allow(deprecated)]
@@ -380,12 +408,12 @@ fn make_webview(ctx: &WebContext) -> WebView {
     wv_settings.set_enable_fullscreen(false);
     wv_settings.set_enable_encrypted_media(false);
     wv_settings.set_enable_mediasource(false);
-    wv_settings.set_enable_media_capabilities(true); // TB does not disable this
+    wv_settings.set_enable_media_capabilities(true); 
     wv_settings.set_media_playback_requires_user_gesture(true);
-    wv_settings.set_enable_hyperlink_auditing(false); // blocks <a ping=> tracking beacons
-    wv_settings.set_enable_smooth_scrolling(false);   // TB does not use smooth scrolling
+    wv_settings.set_enable_hyperlink_auditing(false); 
+    wv_settings.set_enable_smooth_scrolling(false);   
     wv_settings.set_enable_back_forward_navigation_gestures(false);
-    // Normalise font stack — reduces font metric fingerprint surface
+    
     wv_settings.set_default_font_family("serif");
     wv_settings.set_sans_serif_font_family("sans-serif");
     wv_settings.set_monospace_font_family("monospace");
@@ -410,21 +438,24 @@ fn make_webview(ctx: &WebContext) -> WebView {
     webview
 }
 
-/// Attach navigation policy hooks to a webview:
-/// - HTTPS-only: redirect http:// → https://
-/// - Strict Tor: block any request when Tor proxy is unreachable
-/// - Circuit isolation: per-domain SOCKS5 credentials when using Tor
-/// - Header alignment: match Tor Browser's exact header set
+
+
+
+
+
 fn attach_policy_hooks(wv: &WebView, data_mgr: Arc<WebsiteDataManager>, is_tor: bool, strict_tor: bool) {
-    // Align request headers to match Tor Browser (Firefox 115 ESR) exactly.
-    // TB sends Sec-Fetch-* on navigations, a fixed Accept, and no DNT header via JS.
-    wv.connect_resource_load_started(|_wv, _resource: &WebResource, req| {
+    
+    wv.connect_resource_load_started(|wv, _resource: &WebResource, req| {
+        if let Some(uri) = req.uri() {
+            if is_blocked(uri.as_str()) {
+                wv.stop_loading();
+                return;
+            }
+        }
         if let Some(headers) = req.http_headers() {
-            // Remove headers TB does not send
             for h in &["X-Forwarded-For", "Via", "TE", "Origin"] {
                 headers.remove(h);
             }
-            // Set TB's exact header values
             headers.replace("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
             headers.replace("Accept-Language", "en-US,en;q=0.5");
             headers.replace("Accept-Encoding", "gzip, deflate, br");
@@ -437,7 +468,7 @@ fn attach_policy_hooks(wv: &WebView, data_mgr: Arc<WebsiteDataManager>, is_tor: 
                 if let Some(uri_str) = req.and_then(|r| r.uri()) {
                     let uri = uri_str.as_str();
 
-                    // Strict Tor: block if Tor is not reachable right now
+                    
                     if strict_tor && !tor_running() {
                         eprintln!("void: strict-tor — Tor unreachable, blocking {}", uri);
                         nav.ignore();
@@ -451,7 +482,7 @@ fn attach_policy_hooks(wv: &WebView, data_mgr: Arc<WebsiteDataManager>, is_tor: 
                         return true;
                     }
 
-                    // HTTPS-only: cancel and reload with https://
+                    
                     if uri.starts_with("http://") {
                         let https_uri = uri.replacen("http://", "https://", 1);
                         nav.ignore();
@@ -459,7 +490,7 @@ fn attach_policy_hooks(wv: &WebView, data_mgr: Arc<WebsiteDataManager>, is_tor: 
                         return true;
                     }
 
-                    // Circuit isolation for Tor
+                    
                     if is_tor {
                         let domain = uri
                             .trim_start_matches("https://")
@@ -481,8 +512,6 @@ fn attach_policy_hooks(wv: &WebView, data_mgr: Arc<WebsiteDataManager>, is_tor: 
 fn build_ui(app: &Application) {
     let config = load_config();
 
-    // --tor and --tor-strict are identical: both enforce Tor and fail closed at runtime.
-    // There is no "Tor without kill switch" — that would be a false sense of security.
     let strict_tor = env::args().any(|a| a == "--tor-strict" || a == "--tor");
     let force_tor = strict_tor;
 
@@ -518,150 +547,199 @@ fn build_ui(app: &Application) {
         }
     };
 
-    // ── Initial WebView ────────────────────────────────────────────────────────
     let proxy_uri = Arc::new(proxy_uri);
-    let (dm, ctx) = make_webcontext(&proxy_uri);
     let is_tor = proxy_uri.as_deref().map_or(false, |u| u.contains("9050"));
-    // Wrap in Arc<RefCell> so New Identity can swap and clear the old data manager.
-    let data_mgr: Arc<RefCell<Arc<WebsiteDataManager>>> =
-        Arc::new(RefCell::new(Arc::new(dm)));
-    let webview: RefCell<WebView> = RefCell::new(make_webview(&ctx));
-    attach_policy_hooks(&webview.borrow(), data_mgr.borrow().clone(), is_tor, strict_tor);
-    webview.borrow().load_uri(&config.home);
 
-    // ── URL bar ────────────────────────────────────────────────────────────────
+    
+    fn apply_sec_level(wv: &WebView, level: u8) {
+        if let Some(s) = WebViewExt::settings(wv) {
+            let s: Settings = s;
+            match level {
+                0 => { s.set_enable_javascript(true);  s.set_enable_media(true);  s.set_enable_mediasource(true); }
+                1 => { s.set_enable_javascript(false); s.set_enable_media(true);  s.set_enable_mediasource(false); }
+                _ => { s.set_enable_javascript(false); s.set_enable_media(false); s.set_enable_mediasource(false); }
+            }
+        }
+    }
+
+    fn navigate(entry: &Entry, wv: &WebView) {
+        let text = entry.text().to_string();
+        let uri = if text.starts_with("https://") {
+            text
+        } else if text.starts_with("http://") {
+            text.replacen("http://", "https://", 1)
+        } else if text.contains('.') && !text.contains(' ') {
+            format!("https://{}", text)
+        } else {
+            format!("https://search.brave.com/search?q={}", urlencoding::encode(&text))
+        };
+        wv.load_uri(&uri);
+    }
+
+    
     let url_bar = Entry::builder()
         .placeholder_text("Search or enter URL")
         .hexpand(true)
         .build();
 
-    let vbox = GBox::new(Orientation::Vertical, 0);
-    vbox.pack_start(&*webview.borrow(), true, true, 0);
+    
+    let notebook = Notebook::new();
+    notebook.set_scrollable(true);
+    notebook.set_vexpand(true);
 
-    // Connect URI notify for initial webview
-    {
-        let url_bar = url_bar.clone();
-        webview.borrow().connect_uri_notify(move |wv: &WebView| {
-            if let Some(uri) = wv.uri() {
-                url_bar.set_text(uri.as_str());
-            }
-        });
-    }
+    
+    let sec_level: Arc<RefCell<u8>> = Arc::new(RefCell::new(0));
 
-    let webview = Arc::new(webview);
+    
+    
+    let make_tab = {
+        let proxy_uri  = proxy_uri.clone();
+        let url_bar    = url_bar.clone();
+        let notebook   = notebook.clone();
+        let sec_level  = sec_level.clone();
+        let home       = config.home.clone();
+        move |load_uri_str: &str| -> WebView {
+            let (dm, ctx) = make_webcontext(&proxy_uri);
+            let dm = Arc::new(dm);
+            let wv = make_webview(&ctx);
+            attach_policy_hooks(&wv, dm, is_tor, strict_tor);
+            apply_sec_level(&wv, *sec_level.borrow());
+            wv.load_uri(load_uri_str);
 
-    {
-        let webview = webview.clone();
-        url_bar.connect_activate(move |entry| {
-            let text = entry.text().to_string();
-            let uri = if text.starts_with("https://") {
-                text
-            } else if text.starts_with("http://") {
-                text.replacen("http://", "https://", 1)
-            } else if text.contains('.') && !text.contains(' ') {
-                format!("https://{}", text)
-            } else {
-                format!("https://search.brave.com/search?q={}", urlencoding::encode(&text))
-            };
-            webview.borrow().load_uri(&uri);
-        });
-    }
-
-    let back_btn    = Button::with_label("‹");
-    let fwd_btn     = Button::with_label("›");
-    let reload_btn  = Button::with_label("↻");
-    let new_id_btn  = Button::with_label("🔄");
-    new_id_btn.set_tooltip_text(Some("New Identity — fresh ephemeral context"));
-
-    // Security level: Standard → Safer → Safest (cycles on click)
-    // Standard: JS on everywhere
-    // Safer:    JS off on non-HTTPS, SVG animations blocked
-    // Safest:   JS off everywhere, media blocked
-    let sec_level: Arc<RefCell<u8>> = Arc::new(RefCell::new(0)); // 0=Standard,1=Safer,2=Safest
-    let sec_btn = Button::with_label("🛡 Standard");
-    sec_btn.set_tooltip_text(Some("Security level: Standard / Safer / Safest"));
-
-    { let wv = webview.clone(); back_btn.connect_clicked(move |_| wv.borrow().go_back()); }
-    { let wv = webview.clone(); fwd_btn.connect_clicked(move |_| wv.borrow().go_forward()); }
-    { let wv = webview.clone(); reload_btn.connect_clicked(move |_| wv.borrow().reload()); }
-
-    fn apply_sec_level(wv: &WebView, level: u8) {
-        if let Some(s) = WebViewExt::settings(wv) {
-            let s: Settings = s;
-            match level {
-                0 => { // Standard
-                    s.set_enable_javascript(true);
-                    s.set_enable_media(true);
-                    s.set_enable_mediasource(true);
-                }
-                1 => { // Safer — JS disabled; media allowed
-                    s.set_enable_javascript(false);
-                    s.set_enable_media(true);
-                    s.set_enable_mediasource(false);
-                }
-                _ => { // Safest — JS off, media off
-                    s.set_enable_javascript(false);
-                    s.set_enable_media(false);
-                    s.set_enable_mediasource(false);
-                }
-            }
-        }
-    }
-
-    {
-        let webview   = webview.clone();
-        let sec_level = sec_level.clone();
-        sec_btn.connect_clicked(move |btn| {
-            let next = (*sec_level.borrow() + 1) % 3;
-            *sec_level.borrow_mut() = next;
-            let label = match next { 0 => "🛡 Standard", 1 => "🛡 Safer", _ => "🛡 Safest" };
-            btn.set_label(label);
-            apply_sec_level(&webview.borrow(), next);
-            webview.borrow().reload();
-        });
-    }
-
-    // Also apply current sec level when loading new identity
-
-    // New Identity: destroy old webview, create fresh ephemeral context + new webview
-    {
-        let webview   = webview.clone();
-        let vbox      = vbox.clone();
-        let url_bar   = url_bar.clone();
-        let proxy_uri = proxy_uri.clone();
-        let home      = config.home.clone();
-        let sec_level = sec_level.clone();
-        let data_mgr  = data_mgr.clone();
-        new_id_btn.connect_clicked(move |_| {
-            let old = webview.borrow().clone();
-            vbox.remove(&old);
-            // Clear all in-memory state (TLS sessions, HSTS, memory cache, session storage)
-            // before dropping the old context so nothing leaks into the new identity.
-            let old_dm = data_mgr.borrow().clone();
-            old_dm.clear(WebsiteDataTypes::ALL, glib::TimeSpan::from_microseconds(0), gio::Cancellable::NONE, |_| {});
-            old.load_uri("about:blank");
-
-            let (new_dm, new_ctx) = make_webcontext(&proxy_uri);
-            let new_dm = Arc::new(new_dm);
-            *data_mgr.borrow_mut() = new_dm.clone();
-            let nwv = make_webview(&new_ctx);
-            attach_policy_hooks(&nwv, new_dm, is_tor, strict_tor);
-            apply_sec_level(&nwv, *sec_level.borrow());
-            nwv.load_uri(&home);
-            nwv.set_vexpand(true);
-
+            
             {
-                let url_bar = url_bar.clone();
-                nwv.connect_uri_notify(move |wv: &WebView| {
-                    if let Some(uri) = wv.uri() {
-                        url_bar.set_text(uri.as_str());
+                let url_bar  = url_bar.clone();
+                let notebook = notebook.clone();
+                let wv2      = wv.clone();
+                wv.connect_uri_notify(move |wv: &WebView| {
+                    
+                    if let Some(idx) = notebook.page_num(&wv2) {
+                        if notebook.current_page() == Some(idx) {
+                            if let Some(uri) = wv.uri() {
+                                url_bar.set_text(uri.as_str());
+                            }
+                        }
                     }
                 });
             }
 
-            vbox.pack_start(&nwv, true, true, 0);
-            vbox.show_all();
-            *webview.borrow_mut() = nwv;
+            
+            let tab_box   = GBox::new(Orientation::Horizontal, 4);
+            let tab_label = Label::new(Some(&home));
+            tab_label.set_max_width_chars(20);
+            tab_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            let close_btn = Button::with_label("✕");
+            close_btn.set_relief(gtk::ReliefStyle::None);
+            tab_box.pack_start(&tab_label, true, true, 0);
+            tab_box.pack_start(&close_btn, false, false, 0);
+            tab_box.show_all();
+
+            
+            {
+                let tab_label = tab_label.clone();
+                wv.connect_title_notify(move |wv: &WebView| {
+                    if let Some(t) = wv.title() {
+                        tab_label.set_text(t.as_str());
+                    }
+                });
+            }
+
+            let page_idx = notebook.append_page(&wv, Some(&tab_box));
+            notebook.set_tab_reorderable(&wv, true);
+            wv.show();
+
+            
+            {
+                let notebook = notebook.clone();
+                let wv2      = wv.clone();
+                close_btn.connect_clicked(move |_| {
+                    if let Some(idx) = notebook.page_num(&wv2) {
+                        notebook.remove_page(Some(idx));
+                    }
+                });
+            }
+
+            notebook.set_current_page(Some(page_idx));
+            wv
+        }
+    };
+
+    
+    make_tab(&config.home);
+
+    
+    {
+        let url_bar = url_bar.clone();
+        notebook.connect_switch_page(move |nb, page, _idx| {
+            if let Some(wv) = page.downcast_ref::<WebView>() {
+                if let Some(uri) = wv.uri() {
+                    url_bar.set_text(uri.as_str());
+                }
+            } else {
+                
+                let _ = nb; 
+            }
+        });
+    }
+
+    
+    let back_btn   = Button::with_label("‹");
+    let fwd_btn    = Button::with_label("›");
+    let reload_btn = Button::with_label("↻");
+    let new_tab_btn = Button::with_label("+");
+    new_tab_btn.set_tooltip_text(Some("New tab (isolated context)"));
+    let new_id_btn = Button::with_label("🔄");
+    new_id_btn.set_tooltip_text(Some("New Identity — replace current tab with fresh context"));
+    let sec_btn = Button::with_label("🛡 Standard");
+    sec_btn.set_tooltip_text(Some("Security level: Standard / Safer / Safest"));
+
+    
+    let current_wv = {
+        let notebook = notebook.clone();
+        move || -> Option<WebView> {
+            let idx = notebook.current_page()?;
+            notebook.nth_page(Some(idx))?.downcast::<WebView>().ok()
+        }
+    };
+
+    { let f = current_wv.clone(); back_btn.connect_clicked(move |_|   { f().map(|wv| wv.go_back());   }); }
+    { let f = current_wv.clone(); fwd_btn.connect_clicked(move |_|    { f().map(|wv| wv.go_forward()); }); }
+    { let f = current_wv.clone(); reload_btn.connect_clicked(move |_| { f().map(|wv| wv.reload());     }); }
+
+    {
+        let make_tab   = make_tab.clone();
+        let home       = config.home.clone();
+        new_tab_btn.connect_clicked(move |_| { make_tab(&home); });
+    }
+
+    {
+        let url_bar  = url_bar.clone();
+        let f        = current_wv.clone();
+        url_bar.connect_activate(move |entry| {
+            if let Some(wv) = f() { navigate(entry, &wv); }
+        });
+    }
+
+    {
+        let sec_level = sec_level.clone();
+        let f         = current_wv.clone();
+        sec_btn.connect_clicked(move |btn| {
+            let next = (*sec_level.borrow() + 1) % 3;
+            *sec_level.borrow_mut() = next;
+            btn.set_label(match next { 0 => "🛡 Standard", 1 => "🛡 Safer", _ => "🛡 Safest" });
+            if let Some(wv) = f() { apply_sec_level(&wv, next); wv.reload(); }
+        });
+    }
+
+    
+    {
+        let notebook  = notebook.clone();
+        let make_tab  = make_tab.clone();
+        let home      = config.home.clone();
+        new_id_btn.connect_clicked(move |_| {
+            let idx = match notebook.current_page() { Some(i) => i, None => return };
+            notebook.remove_page(Some(idx));
+            make_tab(&home);
         });
     }
 
@@ -673,6 +751,7 @@ fn build_ui(app: &Application) {
     header.pack_start(&back_btn);
     header.pack_start(&fwd_btn);
     header.pack_start(&reload_btn);
+    header.pack_start(&new_tab_btn);
     header.pack_end(&sec_btn);
     header.pack_end(&new_id_btn);
     header.pack_end(&proxy_label);
@@ -685,11 +764,11 @@ fn build_ui(app: &Application) {
         .default_height(800)
         .build();
     window.set_titlebar(Some(&header));
-    window.add(&vbox);
+    window.add(&notebook);
 
     let css = gtk::CssProvider::new();
     css.load_from_data(if config.theme == "dark" {
-        b"window { background: #0d0d0d; } headerbar { background: #111; color: #eee; }"
+        b"window { background: #0d0d0d; } headerbar { background: #111; color: #eee; } notebook tab { background: #1a1a1a; color: #ccc; } notebook tab:checked { background: #222; color: #fff; }"
     } else {
         b"window { background: #fafafa; } headerbar { background: #f0f0f0; color: #111; }"
     })
@@ -710,13 +789,13 @@ fn build_ui(app: &Application) {
 }
 
 fn main() {
-    // Kill tor child on SIGTERM/SIGINT so no orphan process is left on crash or kill.
-    // glib's main loop doesn't run signal handlers, so we use Unix signal via libc.
+    
+    
     unsafe {
         libc::signal(libc::SIGTERM, sigterm_handler as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT,  sigterm_handler as *const () as libc::sighandler_t);
     }
-    // Also catch panics — ensures tor is killed even on Rust panics.
+    
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         kill_tor();

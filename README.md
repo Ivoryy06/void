@@ -8,7 +8,9 @@ A privacy-focused web browser built on WebKit2GTK with Tor integration and compr
 - **Per-domain circuit isolation** — Each domain uses a separate Tor circuit
 - **Comprehensive fingerprinting resistance** — JavaScript and engine-level protections matching Tor Browser
 - **Ephemeral sessions** — No disk persistence; all data cleared on exit
-- **New Identity** — Complete context reset with fresh Tor circuits
+- **Isolated tabs** — Each tab gets its own ephemeral context (no cross-tab correlation)
+- **Built-in ad/tracker blocking** — 60+ known tracker and ad domains blocked at the network level
+- **New Identity** — Replaces current tab with a fresh isolated context
 - **HTTPS-only** — Automatic HTTP→HTTPS upgrade
 - **Security levels** — Standard/Safer/Safest modes (Tor Browser-style)
 - **Clean shutdown** — Tor process killed on exit/crash/signal
@@ -179,20 +181,32 @@ void/
 #### 3. Identity Isolation
 
 **Ephemeral Context:**
-- `WebsiteDataManager::new_ephemeral()` — no disk persistence
+- `WebsiteDataManager::new_ephemeral()` — no disk persistence, scoped to void only
 - Cookies: never accepted
 - Credentials: never stored
 - Cache: memory-only, cleared on exit
+- No access to other browsers' data
+
+**Isolated Tabs:**
+- Each tab creates its own `WebContext` + `WebsiteDataManager`
+- No shared cookies, cache, or session state between tabs
+- Cross-tab correlation is not possible
 
 **New Identity:**
-1. Clears all in-memory state: `WebsiteDataTypes::ALL`
-   - Memory cache
-   - HSTS cache
-   - Session storage
-   - TLS session data
-2. Destroys old WebView and WebContext
-3. Creates fresh ephemeral context
-4. Loads home page with new Tor circuits
+1. Removes current tab
+2. Creates a fresh ephemeral context with new Tor circuits
+3. Loads home page
+
+#### 4. Ad/Tracker Blocking
+
+Requests to 60+ known tracker and ad domains are blocked before they are sent:
+- Google Ads, Analytics, Tag Manager
+- Facebook pixel, Connect
+- Criteo, Taboola, Outbrain
+- Hotjar, Mixpanel, Amplitude, Segment, FullStory
+- Major ad exchanges (AppNexus, Rubicon, OpenX, PubMatic, etc.)
+
+Blocking happens in `connect_resource_load_started` — the request never leaves the process.
 
 #### 4. Security Levels
 
@@ -243,8 +257,7 @@ fn main()
 
 **Key data structures:**
 
-- `Arc<RefCell<Arc<WebsiteDataManager>>>` — Allows New Identity to swap and clear old manager
-- `Arc<RefCell<WebView>>` — Allows New Identity to swap WebView
+- `Arc<Notebook>` — GTK notebook for tab management
 - `static Mutex<Option<Child>>` — Global Tor child for signal handlers
 
 ### Dependencies
@@ -262,6 +275,7 @@ fn main()
 - `dirs` — XDG directory paths
 - `urlencoding` — URL encoding for SOCKS5 credentials
 - `libc` — Signal handling (SIGTERM/SIGINT)
+- `regex` — (dependency of blocklist matching infrastructure)
 
 ## Verification
 
@@ -311,6 +325,8 @@ See [`FINGERPRINTING.md`](FINGERPRINTING.md) for mitigation options.
 - Network-level correlation (via Tor circuit isolation)
 - Disk-based tracking (ephemeral sessions)
 - Timing attacks (performance.now clamping, setTimeout flooring)
+- Ad/tracker network requests (built-in blocklist)
+- Cross-tab correlation (per-tab isolated contexts)
 
 ⚠️ **Partial protection:**
 - TLS fingerprinting (GnuTLS vs NSS difference)

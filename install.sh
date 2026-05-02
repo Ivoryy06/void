@@ -163,8 +163,10 @@ main() {
             echo ""
             success "void installed successfully"
             echo ""
-            echo "  Run:  void"
-            echo "  Tor:  void --tor"
+            echo "  Run:        void"
+            echo "  Tor mode:   void --tor"
+            echo "  New tab:    + button in toolbar"
+            echo "  New ID:     🔄 button (fresh isolated context)"
             echo ""
             ;;
         uninstall)
