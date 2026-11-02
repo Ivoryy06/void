@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# void installer — made by Ivoryy06 ♡
+# Installs void for the current user only. Never changes the default browser.
+
 BINARY_NAME="void"
 INSTALL_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
+ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
 BINARY_PATH="$INSTALL_DIR/$BINARY_NAME"
 
 RED='\033[0;31m'
@@ -13,14 +17,13 @@ NC='\033[0m'
 
 info()    { echo -e "${GREEN}[+]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
-error()   { echo -e "${RED}[✗]${NC} $1"; exit 1; }
-success() { echo -e "${GREEN}[✓]${NC} $1"; }
+error()   { echo -e "${RED}[x]${NC} $1"; exit 1; }
+success() { echo -e "${GREEN}[ok]${NC} $1"; }
 
 check_cmd() {
     command -v "$1" &>/dev/null
 }
 
-# ── Detect package manager ────────────────────────────────────────────────────
 detect_distro() {
     if check_cmd apt; then echo "apt"
     elif check_cmd dnf; then echo "dnf"
@@ -29,32 +32,21 @@ detect_distro() {
     fi
 }
 
-# ── Check system dependencies ─────────────────────────────────────────────────
 check_deps() {
     info "Checking system dependencies..."
 
     local missing=()
 
-    # Check pkg-config
     check_cmd pkg-config || missing+=("pkg-config")
-
-    # Check GTK3
     pkg-config --exists gtk+-3.0 2>/dev/null || missing+=("libgtk-3-dev")
-
-    # Check WebKit2GTK
     pkg-config --exists webkit2gtk-4.1 2>/dev/null || missing+=("libwebkit2gtk-4.1-dev")
-
-    # Check libsoup3
     pkg-config --exists libsoup-3.0 2>/dev/null || missing+=("libsoup-3.0-dev")
 
-    # Check tor
     check_cmd tor || warn "tor not found — Tor mode will not be available"
 
     if [ ${#missing[@]} -gt 0 ]; then
         warn "Missing dependencies: ${missing[*]}"
-        local distro
-        distro=$(detect_distro)
-        case "$distro" in
+        case "$(detect_distro)" in
             apt)
                 echo ""
                 echo "Install with:"
@@ -83,19 +75,18 @@ check_deps() {
     fi
 }
 
-# ── Check Rust toolchain ──────────────────────────────────────────────────────
 check_rust() {
     info "Checking Rust toolchain..."
     if ! check_cmd cargo; then
         warn "Rust not found. Installing via rustup..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+        # shellcheck disable=SC1091
         source "$HOME/.cargo/env"
         check_cmd cargo || error "Rust installation failed"
     fi
     success "Rust $(rustc --version | cut -d' ' -f2) found"
 }
 
-# ── Build ─────────────────────────────────────────────────────────────────────
 build() {
     info "Building void (release)..."
     cargo build --release 2>&1 | tail -5
@@ -103,7 +94,6 @@ build() {
     success "Build complete"
 }
 
-# ── Install binary ────────────────────────────────────────────────────────────
 install_binary() {
     info "Installing binary to $INSTALL_DIR..."
     mkdir -p "$INSTALL_DIR"
@@ -111,46 +101,65 @@ install_binary() {
     chmod +x "$BINARY_PATH"
     success "Binary installed: $BINARY_PATH"
 
-    # Warn if not in PATH
     if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
         warn "$INSTALL_DIR is not in your PATH"
-        echo "  Add to ~/.bashrc or ~/.zshrc:"
+        echo "  Add this to ~/.bashrc or ~/.zshrc:"
         echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
     fi
 }
 
-# ── Desktop entry ─────────────────────────────────────────────────────────────
+install_icon() {
+    if [ -f "assets/void.svg" ]; then
+        info "Installing icon..."
+        mkdir -p "$ICON_DIR"
+        cp "assets/void.svg" "$ICON_DIR/void.svg"
+        command -v gtk-update-icon-cache &>/dev/null \
+            && gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" &>/dev/null || true
+        success "Icon installed"
+    else
+        warn "assets/void.svg missing — using a stock icon"
+    fi
+}
+
 install_desktop() {
     info "Installing desktop entry..."
     mkdir -p "$DESKTOP_DIR"
     cat > "$DESKTOP_DIR/void.desktop" <<EOF
 [Desktop Entry]
-Name=Void
-Comment=Privacy-focused browser with Tor integration
+Name=void
+Comment=Quiet private browser with Tor and ephemeral tabs
 Exec=$BINARY_PATH %u
+Icon=void
 Terminal=false
 Type=Application
 Categories=Network;WebBrowser;
 Keywords=browser;privacy;tor;anonymous;
 StartupNotify=true
+StartupWMClass=void
+Actions=Tor;
+
+[Desktop Action Tor]
+Name=Open with Tor
+Exec=$BINARY_PATH --tor
 EOF
+    # Deliberately no MimeType line: void does not claim to be a default browser.
     success "Desktop entry installed: $DESKTOP_DIR/void.desktop"
 }
 
-# ── Uninstall ─────────────────────────────────────────────────────────────────
 uninstall() {
     info "Uninstalling void..."
     rm -f "$BINARY_PATH"
     rm -f "$DESKTOP_DIR/void.desktop"
-    success "Uninstalled"
-    warn "Config at ~/.config/void/ was not removed"
+    rm -f "$ICON_DIR/void.svg"
+    success "Binary, desktop entry and icon removed"
+    warn "Config at ~/.config/void/ was left alone"
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────────
 main() {
     echo ""
-    echo "  void browser installer"
-    echo "  ─────────────────────"
+    echo "  void installer"
+    echo "  ──────────────"
+    echo "  made by Ivoryy06 ♡"
     echo ""
 
     case "${1:-install}" in
@@ -159,14 +168,15 @@ main() {
             check_rust
             build
             install_binary
+            install_icon
             install_desktop
             echo ""
-            success "void installed successfully"
+            success "void installed"
             echo ""
             echo "  Run:        void"
             echo "  Tor mode:   void --tor"
-            echo "  New tab:    + button in toolbar"
-            echo "  New ID:     🔄 button (fresh isolated context)"
+            echo "  New tab:    + (isolated context)"
+            echo "  New id:     fresh session and circuits"
             echo ""
             ;;
         uninstall)

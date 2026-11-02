@@ -1,163 +1,160 @@
-# Fingerprinting Resistance — Current State & Verification
+# Fingerprinting resistance
 
-## What's Implemented
+What void actually does, what it can't do, and how to check it.
 
-### JavaScript Layer (Tor Browser Alignment)
-- ✅ Canvas fingerprinting: blank data (matches TB exactly)
-- ✅ AudioContext: zero-filled frequency data
-- ✅ WebRTC: fully blocked
-- ✅ Screen dimensions: fixed to 1920×1080 (TB defaults)
-- ✅ Window letterboxing: 1000×800 (TB standard size)
-- ✅ Navigator properties: match TB/Firefox 115 ESR on Windows
-- ✅ Timezone: forced UTC at both JS and engine level
-- ✅ performance.now(): clamped to 100ms resolution
-- ✅ setTimeout/setInterval: 4ms minimum (TB behavior)
-- ✅ SharedArrayBuffer/Atomics: blocked (Spectre mitigation)
-- ✅ Font enumeration: only generic families allowed
-- ✅ Layout rects: quantized to 1px (removes sub-pixel font metrics)
-- ✅ visualViewport: spoofed to letterboxed dimensions
-- ✅ window.matchMedia: uses letterboxed dimensions
-- ✅ window.name: cleared on every load
+This file describes void 0.2.0. If code and this document disagree, the code wins — and an issue is welcome.
 
-### Engine Layer (WebKit2GTK Settings)
-- ✅ User-Agent: exact TB string (Firefox 115 ESR)
-- ✅ Hardware acceleration: disabled (no GPU fingerprinting)
-- ✅ WebGL: disabled
-- ✅ DNS prefetching: disabled
-- ✅ Storage APIs: disabled (localStorage, sessionStorage, IndexedDB, WebSQL)
-- ✅ Page cache: disabled
-- ✅ Media stream: disabled
-- ✅ WebRTC: disabled at engine level
-- ✅ Hyperlink auditing (`<a ping>`): disabled
-- ✅ Smooth scrolling: disabled (TB doesn't use it)
-- ✅ Back/forward gestures: disabled
-- ✅ Font stack: normalized to generic families
-- ✅ Accept-Language: locked to `en-US,en`
-- ✅ Timezone override: UTC at engine level
-- ✅ Process isolation: per-site processes (cross-site navigation swap)
-- ✅ Sandbox: renderer processes sandboxed
-- ✅ ITP (Intelligent Tracking Prevention): enabled
-- ✅ Cookies: never accepted
-- ✅ TLS errors: fail hard (no bypass prompts)
+## JavaScript layer
 
-### Network Layer
-- ✅ HTTPS-only: all `http://` redirected to `https://`
-- ✅ Tor circuit isolation: per-domain SOCKS5 credentials
-- ✅ Strict Tor mode: runtime kill switch blocks requests if Tor drops
-- ✅ Request headers: match TB (Accept, Accept-Language, Accept-Encoding)
-- ✅ Header removal: X-Forwarded-For, Via, TE, Origin stripped
-- ✅ Referrer policy: no-referrer via meta tag
+Injected at document start into every frame, before page scripts run.
 
-### Identity Isolation
-- ✅ Ephemeral contexts: no disk persistence
-- ✅ New Identity: clears all in-memory state (TLS sessions, HSTS, memory cache)
-- ✅ Per-identity Tor circuits: fresh circuit per New Identity
-- ✅ Signal handlers: Tor child killed on SIGTERM/SIGINT/panic
+### Canvas
 
-## What's NOT Controllable at This Layer
+- `getImageData`, `toDataURL` and `toBlob` return a copy with deterministic 1-LSB noise added.
+- The original canvas is never modified, so drawing apps keep working.
+- Noise is stable for the life of the page, so repeated reads don't reveal a changing fingerprint.
+- Images larger than 4 megapixels skip the noisy copy to avoid stalls.
 
-### TLS/Protocol Fingerprinting (libsoup3/GnuTLS)
-WebKit2GTK uses libsoup3 for HTTP and GnuTLS for TLS. These are not exposed through Rust bindings:
+This is not Tor Browser's exact behaviour (TB blocks readback or prompts), but it removes the hardware/driver-unique signal without breaking canvas rendering.
 
-- ❌ **TLS cipher suite ordering**: GnuTLS default order, not Firefox's
-- ❌ **TLS extensions**: ALPN, SNI, session tickets — GnuTLS behavior
-- ❌ **HTTP/2 frame ordering**: libsoup3 implementation differs from Firefox
-- ❌ **Connection pooling**: libsoup3 manages this internally
-- ❌ **Keep-alive behavior**: libsoup3 default, not Firefox's
+### Audio
 
-**Mitigation options:**
-1. **Patch libsoup3/GnuTLS** to match Firefox TLS fingerprint (requires C code)
-2. **Use a local HTTPS proxy** (e.g., mitmproxy) configured to match Firefox's TLS behavior
-3. **Accept the gap** — Tor Browser itself has minor TLS differences from vanilla Firefox
+- `getFloatFrequencyData`, `getByteFrequencyData`, `getFloatTimeDomainData` and `getByteTimeDomainData` are zero-filled.
 
-### Header Ordering
-libsoup3 controls the order in which headers are sent. We can set header *values* via `headers.replace()`, but not their *order*.
+### WebRTC and capture
 
-- ❌ **Header ordering**: libsoup3 default, not Firefox's exact order
+- `RTCPeerConnection`, the prefixed variants, `RTCDataChannel`, `RTCSessionDescription` and `RTCIceCandidate` are removed.
+- `navigator.mediaDevices` is removed.
+- WebRTC and media streams are also disabled in WebKit settings.
 
-**Mitigation:** This is a weak signal. Most fingerprinting focuses on header *presence* and *values*, not order.
+### Screen and window
 
-### HTTP/2 Behavior
-libsoup3 supports HTTP/2 by default. We cannot disable it or control frame ordering from WebKit2GTK bindings.
+- `screen.width/height` → 1920×1080, `availWidth/availHeight` → 1920×1040.
+- `colorDepth` and `pixelDepth` → 24.
+- `devicePixelRatio` → 1.
+- `outerWidth/outerHeight` and `innerWidth/innerHeight` → 1000×800.
+- `screenX`, `screenY` → 0.
+- `screen.orientation` → landscape-primary, angle 0.
+- The GTK layout really does keep the WebView at 1000×800, with empty space around it, so the spoofed numbers match the rendered viewport.
 
-- ❌ **HTTP/2 vs HTTP/1.1 selection**: libsoup3 negotiates via ALPN
-- ❌ **HTTP/2 frame ordering**: libsoup3 implementation
+### Navigator
 
-**Potential mitigation:** Force HTTP/1.1 via soup3's `set_force_http1()` on the session object — but this requires accessing the soup session, which WebKit2GTK doesn't expose directly.
+Values match Firefox 115 ESR on Windows, which is what the User-Agent claims:
 
-## Verification Checklist
+| Property | Value |
+| --- | --- |
+| `hardwareConcurrency` | 2 |
+| `platform` | `Win32` |
+| `oscpu` | `Windows NT 10.0; Win64; x64` |
+| `language` / `languages` | `en-US` / `en-US, en` |
+| `vendor` | empty |
+| `product` / `productSub` | `Gecko` / `20100101` |
+| `appName` / `appCodeName` | `Netscape` / `Mozilla` |
+| `appVersion` | `5.0 (Windows)` |
+| `maxTouchPoints` | 0 |
+| `webdriver` | false |
+| `doNotTrack` | `1` |
+| `plugins` / `mimeTypes` | empty |
+| `buildID` | `20181001000000` |
 
-Run void against these test suites and compare results to Tor Browser:
+`userAgent` is not patched in JavaScript; the engine sends the matching Firefox 115 string, so HTTP headers and `navigator.userAgent` agree.
 
-### JavaScript Fingerprinting
-- [ ] [coveryourtracks.eff.org](https://coveryourtracks.eff.org)
-- [ ] [browserleaks.com/canvas](https://browserleaks.com/canvas)
-- [ ] [browserleaks.com/webgl](https://browserleaks.com/webgl)
-- [ ] [browserleaks.com/webrtc](https://browserleaks.com/webrtc)
-- [ ] [browserleaks.com/fonts](https://browserleaks.com/fonts)
-- [ ] [browserleaks.com/javascript](https://browserleaks.com/javascript)
+### Time
 
-### Network/TLS Fingerprinting
-- [ ] [browserleaks.com/ssl](https://browserleaks.com/ssl)
-- [ ] [browserleaks.com/ip](https://browserleaks.com/ip) (verify Tor exit IP)
-- [ ] [tls.peet.ws/api/all](https://tls.peet.ws/api/all) (TLS fingerprint)
-- [ ] [www.ssllabs.com/ssltest/viewMyClient.html](https://www.ssllabs.com/ssltest/viewMyClient.html)
+- Timezone is forced to UTC by the WebKit context (`time_zone_override`).
+- No `Date` or `Intl` monkey-patching. Broken date shims are a bigger tell than UTC itself.
+- `performance.now()` is rounded down to 100 ms, matching Tor Browser's reduced timer precision.
+- `setTimeout` and `setInterval` have a 4 ms floor.
 
-### Timing/Behavior
-- [ ] [browserleaks.com/performance](https://browserleaks.com/performance)
-- [ ] Verify `performance.now()` is clamped to 100ms
-- [ ] Verify `setTimeout(fn, 0)` actually waits 4ms
+### Storage and shared memory
 
-### Headers
-- [ ] Capture request headers via a local proxy (e.g., `mitmproxy`)
-- [ ] Compare header presence, values, and order to Tor Browser
+- `SharedArrayBuffer` and `Atomics` are removed (Spectre timing mitigation).
+- `window.name` is cleared on document start.
+- DOM storage is available but ephemeral and per tab; IndexedDB and WebSQL are off.
+- Third-party cookies are rejected; first-party cookies live only in memory.
 
-### Tor Circuit Isolation
-- [ ] Visit two different domains, verify different exit IPs (check via [check.torproject.org](https://check.torproject.org))
-- [ ] Click "New Identity", verify exit IP changes
+### Fonts
 
-## Known Gaps vs. Tor Browser
+- The engine font stack is pinned to `serif`, `sans-serif` and `monospace`.
+- `document.fonts.check` is left alone. Patching it breaks sites and is trivially detectable.
+- Layout rectangles are left alone. Rounding them breaks real layout code; generic fonts already remove the font-metric signal.
 
-1. **TLS fingerprint**: GnuTLS vs NSS (Firefox's TLS library)
-   - Different cipher suite ordering
-   - Different extension ordering
-   - Different session ticket behavior
+## Engine layer (WebKit2GTK)
 
-2. **HTTP/2 behavior**: libsoup3 vs Firefox's HTTP/2 stack
-   - Different frame ordering
-   - Different priority handling
+- User-Agent: Firefox 115 ESR on Windows.
+- Hardware acceleration off, WebGL off, accelerated 2D canvas off.
+- WebRTC, media streams, encrypted media, fullscreen off.
+- DNS prefetching off, page cache off, offline app cache off.
+- Hyperlink auditing (`<a ping>`) off.
+- Smooth scrolling and back/forward gestures off.
+- Top-level navigation to `data:` URLs off.
+- File access from file URLs off; universal access from file URLs off.
+- JavaScript can't open windows automatically or read the clipboard.
+- Modal dialogs allowed (sites depend on them), developer extras off.
+- Site-specific quirks on, so the Firefox UA doesn't break ordinary sites.
+- TLS errors fail hard; there is no bypass prompt.
+- Renderer process isolation and sandbox on, with process swap on cross-site navigation.
+- ITP (Intelligent Tracking Prevention) on.
+- Accepted languages: `en-US, en`.
+- Downloads cancelled on start.
 
-3. **Header ordering**: libsoup3 vs Firefox
-   - Minor difference, low signal
+## Network layer
 
-4. **Rendering engine**: WebKit vs Gecko
-   - Different layout engine (but letterboxing + quantization mitigate this)
-   - Different font rendering (quantized to 1px)
+- Top-level `http://` navigations are upgraded to `https://` in the navigation policy.
+- Clicked links and submitted forms are upgraded in JavaScript.
+- Localhost, `.localhost`, `.local`, `.onion`, `.i2p` and private IPs are left on HTTP.
+- Known tracker hosts are blocked at navigation time and by script-level wrappers for `fetch`, XHR, `sendBeacon`, WebSocket, EventSource and subresource `src`/`href`.
+- Referrer policy is set to `no-referrer` with a meta tag.
+- Tor mode adds a runtime kill switch: if Tor is unreachable, network navigations are ignored and a local page explains why.
+- Every tab has its own network context and its own SOCKS credentials, so Tor isolates tabs into separate circuits.
 
-## Recommendations for L2 (Automated Detection Resistance)
+## What is still visible
 
-1. **Run verification tests** — compare void vs TB on all test suites above
-2. **Capture TLS fingerprints** — use `tls.peet.ws` or `ja3er.com` to compare
-3. **If TLS gap is critical:**
-   - Option A: Patch libsoup3/GnuTLS to match Firefox (hard)
-   - Option B: Run a local HTTPS proxy that normalizes TLS to Firefox (easier)
-   - Option C: Accept the gap — TB itself differs slightly from vanilla Firefox
-4. **Focus on behavioral consistency** — ensure no timing anomalies, no unusual API responses
-5. **Avoid over-rigidity** — don't make the environment *too* perfect (e.g., all values exactly fixed)
+These gaps are structural and are not fixed by JavaScript:
 
-## Current Status
+1. **TLS fingerprint.** libsoup3/GnuTLS vs Firefox's Necko/NSS. Cipher suite order, extensions, session tickets, ALPN details and HTTP/2 frame ordering differ. `tls.peet.ws` will show it.
+2. **HTTP/2 behaviour and header order.** libsoup3 decides these; the Rust bindings don't expose them.
+3. **Engine rendering.** WebKit vs Gecko. Letterboxing and generic fonts reduce the signal but do not remove it.
+4. **Some subresource loads.** WebKit2GTK 2.0.1 has no content-filter API and no `send-request` hook, and `resource-load-started` cannot safely cancel a single request without killing the page. Script wrappers catch most tracker traffic; engine-internal loads may slip through.
+5. **Canvas.** Noise is a mitigation. A fingerprinter can average many samples; Tor Browser's stronger approach is to block or prompt, which void does not do.
+6. **SOCKS credentials.** If Tor is configured without `IsolateSOCKSAuth`, the per-tab circuit separation collapses.
 
-**L1 (Manual Detection Resistance):** ✅ Achieved
-- JavaScript fingerprinting mitigated
-- Network isolation working
-- Tor integration solid
+Mitigations for the TLS gap, if it matters to you:
 
-**L2 (Automated Detection Resistance):** ⚠️ Partial
-- JS layer matches TB closely
-- TLS/HTTP2 layer differs (libsoup3/GnuTLS vs Firefox/NSS)
-- Verification needed to quantify gap
+- Patch libsoup3/GnuTLS (large, fragile).
+- Put a local HTTPS proxy in front that normalises TLS to Firefox's profile.
+- Accept it, and use Tor Browser for high-risk work.
 
-**Next Steps:**
-1. Run verification tests
-2. Measure TLS fingerprint gap
-3. Decide if gap is acceptable or requires proxy/patch
+## Verification checklist
+
+JavaScript surface:
+
+- [ ] `https://coveryourtracks.eff.org`
+- [ ] `https://browserleaks.com/canvas` — canvas hash should differ from a normal browser
+- [ ] `https://browserleaks.com/webgl` — WebGL unavailable
+- [ ] `https://browserleaks.com/webrtc` — no local IP leak
+- [ ] `https://browserleaks.com/javascript` — navigator/screen values match the table above
+- [ ] `https://browserleaks.com/fonts` — only generic families resolve
+
+Network:
+
+- [ ] `https://check.torproject.org` — Tor exit node
+- [ ] Open two tabs to different sites, check exit IPs differ
+- [ ] Click **new id**, check the exit IP changes
+- [ ] `https://tls.peet.ws/api/all` — compare TLS/HTTP2 with Tor Browser
+- [ ] `https://www.ssllabs.com/ssltest/viewMyClient.html`
+
+Behaviour:
+
+- [ ] `performance.now()` moves in 100 ms steps
+- [ ] `setTimeout(fn, 0)` waits at least 4 ms
+- [ ] `navigator.plugins.length === 0`
+- [ ] `RTCPeerConnection === undefined`
+- [ ] Two tabs cannot see each other's cookies
+
+## Status
+
+- **Manual fingerprint resistance:** good for JavaScript-visible surfaces.
+- **Automated / TLS-level resistance:** partial. The engine libraries differ from Firefox and that is visible on the wire.
+
+made by Ivoryy06 ♡
